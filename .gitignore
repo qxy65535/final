@@ -1,0 +1,9 @@
+*.o
+c63enc
+c63dec
+c63pred
+test
+tmp/
+video/
+.vscode/
+*.log
