@@ -12,6 +12,11 @@
 
 __global__ void me_kernel(int padw, int padh, struct macroblock *mbs, int me_search_range, uint8_t *orig, uint8_t *ref, int cc)  
 {
+    __shared__ int sads[16*2][16*2];
+    __shared__ int best_sad;
+    sads[threadIdx.y][threadIdx.x] = 0;
+    best_sad = INT_MAX;
+
     int mb_x = blockIdx.x;
     int mb_y = blockIdx.y;
     struct macroblock *mb = &mbs[mb_y * padw/8 + mb_x];
@@ -40,47 +45,44 @@ __global__ void me_kernel(int padw, int padh, struct macroblock *mbs, int me_sea
         right = w - 8;
     if (bottom > (h - 8))
         bottom = h - 8;
+    if (threadIdx.y >= (bottom-top) || threadIdx.x >= (right-left))
+        return;
 
-
-    int x,y;
     int mx = mb_x * 8;
     int my = mb_y * 8;
 
-    int best_sad = INT_MAX;
+    int row = blockIdx.y*8;
+    int col = blockIdx.x*8;
 
-    for (y=top; y<bottom; ++y)
+    int i,j;
+    for (i=0; i<8; ++i)
     {
-        for (x=left; x<right; ++x)
+        for (j=0; j<8; ++j)
         {
-            __shared__ uint8_t sad_block[8][8];
+            int result = abs(*(orig+(row+i)*w+col+j) - *(ref+(top+threadIdx.y+i)*w+left+threadIdx.x+j));
+            atomicAdd(&sads[threadIdx.y][threadIdx.x], result);
+        }
+    }
 
-            int row = blockIdx.y*blockDim.y+threadIdx.y;
-            int col = blockIdx.x*blockDim.x+threadIdx.x;
-            
-            sad_block[threadIdx.y][threadIdx.x] = abs(*(orig+row*w+col) - 
-                                                  *(ref+(y+threadIdx.y)*w+x+threadIdx.x));
-                                                  
-            // 同步点：等待所有线程完成数据计算
-            __syncthreads();
-            int i,j;
-            int sad = 0;
-            // atomicAdd(&sad, sad_block_8x8[threadIdx.y][threadIdx.x]);
-            for (i=0; i<8; ++i)
-            {
-                for (j=0; j<8; ++j)
-                    sad += sad_block[i][j];
-            }
+    // 找出小的sad值
+    atomicMin(&best_sad, sads[threadIdx.y][threadIdx.x]);
+    __syncthreads();
 
-            if (sad < best_sad)
+    // 找出最相似的参考块
+    for (i=0; i<(bottom-top); ++i)
+    {
+        for (j=0; j<(right-left); ++j)
+        {
+            if (sads[i][j] == best_sad)
             {
-                mb->mv_x = x - mx;
-                mb->mv_y = y - my;
-                best_sad = sad;
+                mb->mv_x = left + j - mx;
+                mb->mv_y = top + i - my;
+                i = bottom-top;
+                break;
             }
         }
     }
     mb->use_mv = 1;
-
 }  
 
 extern "C" void me_block_cuda(struct c63_common *cm, uint8_t *orig_host, uint8_t *ref_host, int cc)
@@ -119,10 +121,16 @@ extern "C" void me_block_cuda(struct c63_common *cm, uint8_t *orig_host, uint8_t
     int grid_x = cc>0 ? cm->mb_cols/2:cm->mb_cols;
     int grid_y = cc>0 ? cm->mb_rows/2:cm->mb_rows;
     dim3 dimGrid(grid_x, grid_y);
-    dim3 dimBlock(8,8);
+    dim3 dimBlock(cm->me_search_range*2,cm->me_search_range*2);
 
     me_kernel<<<dimGrid, dimBlock>>>(cm->padw[cc], cm->padh[cc], mbs, 
                                     cm->me_search_range, orig, ref, cc);
+    cudaError_t cudaStatus = cudaGetLastError();
+    if (cudaStatus != cudaSuccess) 
+    {
+        fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
+    }
+
     cudaMemcpy(cm->curframe->mbs[cc], mbs, size_mbs, cudaMemcpyDeviceToHost);
 
     cudaFree(mbs);

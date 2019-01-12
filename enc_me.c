@@ -10,6 +10,7 @@
 
 #include "c63.h"
 
+void me_block_cuda(struct c63_common *cm, uint8_t *orig_host, uint8_t *ref_host, int cc);
 
 /* Motion estimation for 8x8 block */
 static void me_block_8x8(struct c63_common *cm, int mb_x, int mb_y, uint8_t *orig, uint8_t *ref, int cc)
@@ -76,27 +77,30 @@ static void me_block_8x8(struct c63_common *cm, int mb_x, int mb_y, uint8_t *ori
 void c63_motion_estimate(struct c63_common *cm)
 {
     /* Compare this frame with previous reconstructed frame */
-
+    // printf("111\n");
     int mb_x, mb_y;
-
+    me_block_cuda(cm, cm->curframe->orig->Y, cm->refframe->recons->Y, 0);
+    me_block_cuda(cm, cm->curframe->orig->U, cm->refframe->recons->U, 1);
+    me_block_cuda(cm, cm->curframe->orig->V, cm->refframe->recons->V, 2);
+    // printf("222\n");
     /* Luma */
-    for (mb_y=0; mb_y < cm->mb_rows; ++mb_y)
-    {
-        for (mb_x=0; mb_x < cm->mb_cols; ++mb_x)
-        {
-            me_block_8x8(cm, mb_x, mb_y, cm->curframe->orig->Y, cm->refframe->recons->Y, 0);
-        }
-    }
+    // for (mb_y=0; mb_y < cm->mb_rows; ++mb_y)
+    // {
+    //     for (mb_x=0; mb_x < cm->mb_cols; ++mb_x)
+    //     {
+    //         me_block_8x8(cm, mb_x, mb_y, cm->curframe->orig->Y, cm->refframe->recons->Y, 0);
+    //     }
+    // }
 
-    /* Chroma */
-    for (mb_y=0; mb_y < cm->mb_rows/2; ++mb_y)
-    {
-        for (mb_x=0; mb_x < cm->mb_cols/2; ++mb_x)
-        {
-            me_block_8x8(cm, mb_x, mb_y, cm->curframe->orig->U, cm->refframe->recons->U, 1);
-            me_block_8x8(cm, mb_x, mb_y, cm->curframe->orig->V, cm->refframe->recons->V, 2);
-        }
-    }
+    // /* Chroma */
+    // for (mb_y=0; mb_y < cm->mb_rows/2; ++mb_y)
+    // {
+    //     for (mb_x=0; mb_x < cm->mb_cols/2; ++mb_x)
+    //     {
+    //         me_block_8x8(cm, mb_x, mb_y, cm->curframe->orig->U, cm->refframe->recons->U, 1);
+    //         me_block_8x8(cm, mb_x, mb_y, cm->curframe->orig->V, cm->refframe->recons->V, 2);
+    //     }
+    // }
 }
 
 /* Motion compensation for 8x8 block */

@@ -1,6 +1,7 @@
 ## 目录
 #### - [优化说明](#optimization)
 - [version 1.0](#v1)
+- [version 2.0](#v2)
 #### - [优化结果](#result)
 #### - [执行指令](#shell)
 
@@ -12,9 +13,14 @@
 
 ## version 1.0
 
-在优化作业中，我首先尝试以最简单的做法利用 GPU 并行加速 C63 编码器，作为 CUDA C 编程初次尝试。在此版本中，我将运动估计用到的当前帧、参考帧、每一宏块记录参考帧中最相似块位置的结构体 mbs (macroblock) 及其他参数从 host 传入 device，将设备的 Grid 划分为 (width/8, height/8) 个 Block，每个 Block 8\*8 个 Thread，即一个 Grid 处理一张图像大小的数据，每个 Block 对一个宏块与参考帧求 SAD（绝对差的总和）。global 函数中以循环的形式遍历参考帧中的宏块寻找最相似的宏块，因此程序仍需要 width\*height 次数的串行 SAD 操作。在运动估计 kernel（核函数） 中，关键操作如下：
+**git commit id: 04f7a58e92082ce44f62bf746f1e0cb3910c58e2**
+
+在优化作业中，我首先尝试以最简单的做法利用 GPU 并行加速 C63 编码器，作为 CUDA C 编程初次尝试。在此版本中，我将运动估计用到的当前帧、参考帧、每一宏块记录参考帧中最相似块位置的结构体 mbs (macroblock) 及其他参数从 host 传入 device，将设备的 Grid 划分为 (width/8, height/8) 个 Block，每个 Block 有 8\*8 个 Thread，即一个 Grid 处理一张图像大小的数据，每个 Block 对一个宏块与参考帧求 SAD（绝对差的总和）。global 函数中以循环的形式遍历参考帧中的宏块寻找最相似的宏块，因此程序仍需要约 (me\_search\_range \* 2)^2 次数的串行 SAD 操作。在运动估计 kernel（核函数） 中，关键操作如下：
 
 ```c
+int mb_x = blockIdx.x;
+int mb_y = blockIdx.y;
+
 for (y=top; y<bottom; ++y)
 {
     for (x=left; x<right; ++x)
@@ -25,7 +31,7 @@ for (y=top; y<bottom; ++y)
         int col = blockIdx.x*blockDim.x+threadIdx.x;
         
         sad_block[threadIdx.y][threadIdx.x] = abs(*(orig+row*w+col) - 
-                                                *(ref+(y+threadIdx.y)*w+x+threadIdx.x));
+                                              *(ref+(y+threadIdx.y)*w+x+threadIdx.x));
         
         // 同步点：等待所有线程完成数据计算
         __syncthreads();
@@ -80,7 +86,7 @@ extern "C" void me_block_cuda(struct c63_common *cm, uint8_t *orig_host, uint8_t
 }
 ```
 
-经测试，在这一版代码优化后，对 foreman 文件的处理时间由 33s 左右缩短为 15s 左右，对 tractor 文件的处理时间由 1756s 左右缩短为 705s 左右，加速比约为 2.3 倍。利用 nvprof 工具可以看到如下结果：
+经测试，在这一版代码优化后，对 foreman 文件的处理时间由 33s 左右缩短为 15.49s，对 tractor 文件的处理时间由 1756s 左右缩短为 704.80s，加速比约为 2.3 倍，文件解码后 psnr 分别为 36.62 和 39.42，对 tractor 文件而言 psnr 略有下降，可能是编码过程中造成的些微误差。利用 nvprof 工具可以看到如下结果：
 
 ```shell
 ==27503== Profiling application: ./c63enc -w 352 -h 288 -o tmp/FOREMAN_352x288_30_orig_01.c63 /home/FOREMAN_352x288_30_orig_01.yuv
@@ -123,11 +129,108 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
 
 一开始，将每一宏块记录参考帧中最相似块位置的结构体 mbs (macroblock) 也传输到了 GPU 中，但后来认识到 GPU 的数据处理过程中，并不需要 mbs 的原本，只需要开辟存储它的空间及标识它的名字，因此取消了对它的拷贝。在注释掉这行之后，cudaMemcpy 的调用次数由之前的 3564 减少为现在的 2673，对计算结果没有影响。虽然确实存在优化，但由于前文所述，数据传输不是目前的瓶颈，而且占用的时间非常少，对时间结果而言，这个优化带来的影响几乎不可见。
 
+<div id="v2"> </div>
+
+## version 2.0
+
+这一版本中修改了数据并行的方式，提高了数据的并行度。考虑到每个 Block 最多 1024 个线程，且仅块内线程能比较容易地实现数据共享，而 SAD 操作中不仅需要将 8\*8 的数据块逐差累加，还需要对比参考帧中当前宏块附近的宏块计算得到的 SAD 值以找出最相近的块，当取 16 为搜索步长时，将至多处理 32\*8\*32\*8 个数据。理想情况下需要在块内开启  32\*8\*32\*8 = 65536 个线程对数据并行处理，但由于块内线程数限制，不具有可行性；而通过进一步增加 Block 数量实现的并行会带来关联数据共享（主要是 SAD 比较）的麻烦。
+
+因此在 version 2.0 中，我依然将 Grid 划分为 (width/8, height/8) 个 Block，而每个 Block 使用 32\*32 = 1024 个线程，每个线程计算一个宏块与它附近一个宏块之间的 SAD，此时一个线程内存在 8\*8 次的串行操作。由于图像的边界，有些宏块运动估计搜索的宏块数少于 1024，此时根据实际搜索的数量，Block 内部分线程将提前结束。代码中使用 32\*32 大小的共享存储器交换各个线程（即参考帧宏块）计算得到的 SAD，并从中选出最相似的宏块。
+
+核函数代码如下：
+
+```c
+__global__ void me_kernel(int padw, int padh, struct macroblock *mbs, int me_search_range, uint8_t *orig, uint8_t *ref, int cc)  
+{
+    __shared__ int sads[16*2][16*2];
+    __shared__ int best_sad;
+    sads[threadIdx.y][threadIdx.x] = 0;
+    best_sad = INT_MAX;
+
+    int mb_x = blockIdx.x;
+    int mb_y = blockIdx.y;
+    
+    ...
+        
+    int row = blockIdx.y*8;
+    int col = blockIdx.x*8;
+
+    int i,j;
+    for (i=0; i<8; ++i)
+    {
+        for (j=0; j<8; ++j)
+        {
+            int result = abs(*(orig+(row+i)*w+col+j) - 
+                             *(ref+(top+threadIdx.y+i)*w+left+threadIdx.x+j));
+            atomicAdd(&sads[threadIdx.y][threadIdx.x], result);
+        }
+    }
+
+    // 找出小的sad值
+    atomicMin(&best_sad, sads[threadIdx.y][threadIdx.x]);
+    __syncthreads();
+
+    // 找出最相似的参考块
+    for (i=0; i<(bottom-top); ++i)
+    {
+        for (j=0; j<(right-left); ++j)
+        {
+            if (sads[i][j] == best_sad)
+            {
+                mb->mv_x = left + j - mx;
+                mb->mv_y = top + i - my;
+                i = bottom-top;
+                break;
+            }
+        }
+    }
+    mb->use_mv = 1;
+}  
+```
+
+经测试，在这一版代码优化后，对 foreman 文件的处理时间为 6.96s，对 tractor 文件的处理时间由为 278.39s，相对于原版代码加速比约为 2.3 倍，文件解码后 psnr 分别为 36.62 和 39.43，与原版编码器得到的结果相同。利用 nvprof 工具可以看到如下结果：
+
+```shell
+==17506== Profiling application: ./c63enc -w 352 -h 288 -o tmp/FOREMAN_352x288_30_orig_01.c63 /home/FOREMAN_352x288_30_orig_01.yuv
+==17506== Profiling result:
+Time(%)      Time     Calls       Avg       Min       Max  Name
+ 99.17%  3.50949s       891  3.9388ms  1.1101ms  12.460ms  me_kernel(int, int, macroblock*, int, unsigned char*, unsigned char*, int)
+  0.74%  26.115ms      1782  14.654us  5.4400us  28.481us  [CUDA memcpy HtoD]
+  0.09%  3.1170ms       891  3.4980us  2.8160us  11.872us  [CUDA memcpy DtoH]
+
+==17506== API calls:
+Time(%)      Time     Calls       Avg       Min       Max  Name
+ 80.76%  3.61036s      2673  1.3507ms  31.686us  12.482ms  cudaMemcpy
+ 12.71%  568.03ms      2673  212.51us  5.3340us  239.58ms  cudaMalloc
+  6.05%  270.27ms      2673  101.11us  8.7620us  265.13us  cudaFree
+  0.39%  17.541ms       891  19.686us  16.582us  53.811us  cudaLaunch
+  0.04%  1.7320ms      6237     277ns     172ns  62.732us  cudaSetupArgument
+  0.02%  1.1129ms       166  6.7040us     299ns  268.08us  cuDeviceGetAttribute
+  0.01%  570.66us       891     640ns     499ns  3.0340us  cudaConfigureCall
+  0.01%  402.48us       891     451ns     339ns  12.863us  cudaGetLastError
+  0.00%  146.78us         2  73.390us  63.445us  83.336us  cuDeviceTotalMem
+  0.00%  110.29us         2  55.145us  51.847us  58.444us  cuDeviceGetName
+  0.00%  5.6030us         2  2.8010us  1.0330us  4.5700us  cuDeviceGetCount
+  0.00%  2.9770us         4     744ns     416ns  1.3210us  cuDeviceGet
+```
+
+可见核函数的运行时间被极大地压缩了，version 2.0 比起 version 1.0 具有很大程度的提升。
+
 <div id="result"> </div>
 
 ## 优化结果
 
-由于 gprof 工具无法记录 GPU 调用的时间，因此本次实验仍采用 clock 方法在程序始末添加时钟，计算程序执行的总时间。
+由于 gprof 工具无法记录 GPU 调用的时间，因此本次实验仍采用 clock 方法在程序始末添加时钟计算程序执行的总时间。本表格中，运行时间为在服务器上连续运行十次取平均值，使用的显卡为 Tesla K20c。
+
+|  优化内容   | time(foreman) | time(tractor) | PSNR(foreman) | PSNR(tractor) |
+| :---------: | :-----------: | :-----------: | :-----------: | :-----------: |
+|  原始代码   |               |               |     36.62     |     39.43     |
+| version 1.0 |     15.49     |    704.80     |     36.62     |     39.42     |
+| version 2.0 |     6.96      |    278.39     |     36.62     |     39.43     |
+|             |               |               |               |               |
+|             |               |               |               |               |
+|             |               |               |               |               |
+|             |               |               |               |               |
 
 <div id="shell"> </div>
 
