@@ -6,13 +6,6 @@ gprof c63enc gmon.out -p
 ## 目录
 #### - [优化说明](#optimization)
 - [version 1.0](#v1)
-- [sad\_block\_8x8 函数的优化v1](#optimization1)
-- [sad\_block\_8x8 函数的优化v2.3](#optimization2)
-- [sad\_block\_8x8 函数的优化v2.5](#optimization5)
-- [quantize\_block & dequantize\_block 函数的优化](#optimization3)
-- [scale\_block 函数的优化](#optimization4)
-- [dct\_1d 函数的优化](#optimization6)
-- [原版代码 BUG 解决](#bug)
 #### - [优化结果](#result)
 #### - [执行指令](#shell)
 
@@ -114,7 +107,7 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
 
 由于 kernel 的调用是异步的，调用 kernel 后不久主机线程就会获得控制，这样一来下一个 cudaMemcpy 会在 kernel 完成执行前启动。 而 cudaMemcpy 会阻塞等待 kernel 的结果，直到 kernel  执行结束才进行数据传输并返回。如图1所示：
 
-![1547261461144](image\1547261461144.png)
+![1547261461144](image/1547261461144.png)
 
 图1 核函数和 cudaMemcpy 调用示意
 
