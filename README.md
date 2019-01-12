@@ -1,15 +1,15 @@
-原版：
-foreman  35.06
-tractor  1758.77
-gprof c63enc gmon.out -p
-
 ## 目录
 #### - [优化说明](#optimization)
 - [version 1.0](#v1)
 #### - [优化结果](#result)
 #### - [执行指令](#shell)
 
-<div  id="v1"> </div>
+<div id="optimization"> </div>
+
+## 优化说明
+
+<div id="v1"> </div>
+
 ## version 1.0
 
 在优化作业中，我首先尝试以最简单的做法利用 GPU 并行加速 C63 编码器，作为 CUDA C 编程初次尝试。在此版本中，我将运动估计用到的当前帧、参考帧、每一宏块记录参考帧中最相似块位置的结构体 mbs (macroblock) 及其他参数从 host 传入 device，将设备的 Grid 划分为 (width/8, height/8) 个 Block，每个 Block 8\*8 个 Thread，即一个 Grid 处理一张图像大小的数据，每个 Block 对一个宏块与参考帧求 SAD（绝对差的总和）。global 函数中以循环的形式遍历参考帧中的宏块寻找最相似的宏块，因此程序仍需要 width\*height 次数的串行 SAD 操作。在运动估计 kernel（核函数） 中，关键操作如下：
@@ -168,4 +168,5 @@ $ vlc --rawvid-width 1920 --rawvid-height 1080 --rawvid-fps 30 --rawvid-chroma I
 **time account**
 ```shell
 $ gprof c63enc gmon.out -p
+$ nvprof --print-gpu-trace ./c63enc -w 352 -h 288 -o tmp/FOREMAN_352x288_30_orig_01.c63 /home/FOREMAN_352x288_30_orig_01.yuv
 ```
