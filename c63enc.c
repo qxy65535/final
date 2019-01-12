@@ -7,6 +7,7 @@
 #include <math.h>
 #include <assert.h>
 #include <limits.h>
+#include <time.h>
 
 #include "c63.h"
 #include "tables.h"
@@ -173,6 +174,8 @@ int main(int argc, char **argv)
 {
     int c;
     yuv_t *image;
+    int start, stop;
+    start = clock();
 
     if(argc == 1)
     {
@@ -214,7 +217,7 @@ int main(int argc, char **argv)
         perror("fopen");
         exit(EXIT_FAILURE);
     }
-
+    
 
     struct c63_common *cm = init_c63_enc(width, height);
     cm->e_ctx.fp = outfile;
@@ -267,8 +270,12 @@ int main(int argc, char **argv)
             break;
     }
 
+
     fclose(outfile);
     fclose(infile);
+    
+    stop = clock();
+    printf("total time: %.2f\n", (float)(stop-start)/CLOCKS_PER_SEC);
 //
 //    int i,j;
 //    for (i=0; i<2; ++i)
