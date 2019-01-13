@@ -15,7 +15,13 @@
 
 **git commit id: 04f7a58e92082ce44f62bf746f1e0cb3910c58e2**
 
-在优化作业中，我首先尝试以最简单的做法利用 GPU 并行加速 C63 编码器，作为 CUDA C 编程初次尝试。在此版本中，我将运动估计用到的当前帧、参考帧、每一宏块记录参考帧中最相似块位置的结构体 mbs (macroblock) 及其他参数从 host 传入 device，将设备的 Grid 划分为 (width/8, height/8) 个 Block，每个 Block 有 8\*8 个 Thread，即一个 Grid 处理一张图像大小的数据，每个 Block 对一个宏块与参考帧求 SAD（绝对差的总和）。global 函数中以循环的形式遍历参考帧中的宏块寻找最相似的宏块，因此程序仍需要约 (me\_search\_range \* 2)^2 次数的串行 SAD 操作。在运动估计 kernel（核函数） 中，关键操作如下：
+在优化作业中，我首先尝试以最简单的做法利用 GPU 并行加速 C63 编码器，作为 CUDA C 编程初次尝试。在此版本中，我将运动估计用到的当前帧、参考帧、每一宏块记录参考帧中最相似块位置的结构体 mbs (macroblock) 及其他参数从 host 传入 device，将设备的 Grid 划分为 (width/8, height/8) 个 Block，每个 Block 有 8\*8 个 Thread，以 352x288 大小的 forman 为例，如图1所示：
+
+![](image/TIM截图20190113132641.png)
+
+图1 以 forman 为例 GPU 使用示意图
+
+即一个 Grid 处理一张图像大小的数据，每个 Block 对一个宏块与参考帧求 SAD（绝对差的总和）。global 函数中以循环的形式遍历参考帧中的宏块寻找最相似的宏块，因此程序仍需要约 (me\_search\_range \* 2)^2 次数的串行 SAD 操作。在运动估计 kernel（核函数） 中，关键操作如下：
 
 ```c
 int mb_x = blockIdx.x;
@@ -86,7 +92,7 @@ extern "C" void me_block_cuda(struct c63_common *cm, uint8_t *orig_host, uint8_t
 }
 ```
 
-经测试，在这一版代码优化后，对 foreman 文件的处理时间由 33s 左右缩短为 15.49s，对 tractor 文件的处理时间由 1756s 左右缩短为 704.80s，加速比约为 2.3 倍，文件解码后 psnr 分别为 36.62 和 39.42，对 tractor 文件而言 psnr 略有下降，可能是编码过程中造成的些微误差。利用 nvprof 工具可以看到如下结果：
+经测试，在这一版代码优化后，对 foreman 文件的处理时间由 35.06s 左右缩短为 15.49s，加速约 2.26 倍；对 tractor 文件的处理时间由 1759.43s 左右缩短为 704.80s，加速约 2.50 倍，文件解码后 psnr 分别为 36.62 和 39.42，对 tractor 文件而言 psnr 略有下降，可能是编码过程中造成的些微误差。利用 nvprof 工具可以看到如下结果：
 
 ```shell
 ==27503== Profiling application: ./c63enc -w 352 -h 288 -o tmp/FOREMAN_352x288_30_orig_01.c63 /home/FOREMAN_352x288_30_orig_01.yuv
@@ -111,11 +117,11 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
   0.00%  2.0290us         4     507ns     284ns     714ns  cuDeviceGet
 ```
 
-由于 kernel 的调用是异步的，调用 kernel 后不久主机线程就会获得控制，这样一来下一个 cudaMemcpy 会在 kernel 完成执行前启动。 而 cudaMemcpy 会阻塞等待 kernel 的结果，直到 kernel  执行结束才进行数据传输并返回。如图1所示：
+由于 kernel 的调用是异步的，调用 kernel 后不久主机线程就会获得控制，这样一来下一个 cudaMemcpy 会在 kernel 完成执行前启动。 而 cudaMemcpy 会阻塞等待 kernel 的结果，直到 kernel  执行结束才进行数据传输并返回。如图2所示：
 
 ![1547261461144](image/1547261461144.png)
 
-图1 核函数和 cudaMemcpy 调用示意
+图2 核函数和 cudaMemcpy 调用示意
 
 因此在以上结果中 API calls 显示 cudaMemcpy 占用了相近于 Profiling result 中核函数调用的时间，就是因为 cudaMemcpy 阻塞了将近一整个核函数执行的时间。从 Profiling result 的结果可以看出，核函数执行的时间一共为 11.7943s 用了绝大部分，而数据传输事实上只有几个毫秒。
 
@@ -133,9 +139,15 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
 
 ## version 2.0
 
+**git commit id: e86fd841ab7abda00cd58b64d3a8c6e07dfb7237**
+
 这一版本中修改了数据并行的方式，提高了数据的并行度。考虑到每个 Block 最多 1024 个线程，且仅块内线程能比较容易地实现数据共享，而 SAD 操作中不仅需要将 8\*8 的数据块逐差累加，还需要对比参考帧中当前宏块附近的宏块计算得到的 SAD 值以找出最相近的块，当取 16 为搜索步长时，将至多处理 32\*8\*32\*8 个数据。理想情况下需要在块内开启  32\*8\*32\*8 = 65536 个线程对数据并行处理，但由于块内线程数限制，不具有可行性；而通过进一步增加 Block 数量实现的并行会带来关联数据共享（主要是 SAD 比较）的麻烦。
 
-因此在 version 2.0 中，我依然将 Grid 划分为 (width/8, height/8) 个 Block，而每个 Block 使用 32\*32 = 1024 个线程，每个线程计算一个宏块与它附近一个宏块之间的 SAD，此时一个线程内存在 8\*8 次的串行操作。由于图像的边界，有些宏块运动估计搜索的宏块数少于 1024，此时根据实际搜索的数量，Block 内部分线程将提前结束。代码中使用 32\*32 大小的共享存储器交换各个线程（即参考帧宏块）计算得到的 SAD，并从中选出最相似的宏块。
+因此在 version 2.0 中，我依然将 Grid 划分为 (width/8, height/8) 个 Block，而每个 Block 使用 32\*32 = 1024 个线程，每个线程计算一个宏块与它附近一个宏块之间的 SAD，此时一个线程内存在 8\*8 次的串行操作。如图3所示，黑色外框为当前帧一个宏块在参考帧中可能搜索的范围，浅蓝色小框为 Block 中每一个线程处理参考帧的图像范围。由于图像的边界，有些宏块运动估计搜索的宏块数少于 1024，此时根据实际搜索的数量，Block 内部分线程将提前结束。代码中使用 32\*32 大小的共享存储器交换各个线程（即参考帧宏块）计算得到的 SAD，并从中选出最相似的宏块。
+
+![](image/TIM截图20190113135146.png)
+
+图3 运动估计搜索示意
 
 核函数代码如下：
 
@@ -188,7 +200,7 @@ __global__ void me_kernel(int padw, int padh, struct macroblock *mbs, int me_sea
 }  
 ```
 
-经测试，在这一版代码优化后，对 foreman 文件的处理时间为 6.96s，对 tractor 文件的处理时间由为 278.39s，相对于原版代码加速比约为 2.3 倍，文件解码后 psnr 分别为 36.62 和 39.43，与原版编码器得到的结果相同。利用 nvprof 工具可以看到如下结果：
+经测试，在这一版代码优化后，对 foreman 文件的处理时间为 6.96s，加速约 5.04 倍；对 tractor 文件的处理时间由为 278.39s，加速约 6.32 倍，文件解码后 psnr 分别为 36.62 和 39.43，与原版编码器得到的结果相同。利用 nvprof 工具可以看到如下结果：
 
 ```shell
 ==17506== Profiling application: ./c63enc -w 352 -h 288 -o tmp/FOREMAN_352x288_30_orig_01.c63 /home/FOREMAN_352x288_30_orig_01.yuv
@@ -214,7 +226,7 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
   0.00%  2.9770us         4     744ns     416ns  1.3210us  cuDeviceGet
 ```
 
-可见核函数的运行时间被极大地压缩了，version 2.0 比起 version 1.0 具有很大程度的提升。
+可见核函数的运行时间被极大地压缩了，version 2.0 比起 version 1.0 具有很大程度的提升。除此之外，由于数据处理的并行化程度与视频分辨率，即每一帧的图像大小相关，而数据传输远远不是目前的瓶颈，因此对分辨率更高的 tractor 文件相比于低分辨率的 foreman 文件获得了更高的加速比，尤其是在更高程度并行化的 version 2.0 中，两者之差体现得更为明显，这也体现了 GPU 更适合对大批量的数据进行并行处理，且数据量越大，加速效果越明显。
 
 <div id="result"> </div>
 
@@ -224,7 +236,7 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
 
 |  优化内容   | time(foreman) | time(tractor) | PSNR(foreman) | PSNR(tractor) |
 | :---------: | :-----------: | :-----------: | :-----------: | :-----------: |
-|  原始代码   |               |               |     36.62     |     39.43     |
+|  原始代码   |     35.06     |    1759.43    |     36.62     |     39.43     |
 | version 1.0 |     15.49     |    704.80     |     36.62     |     39.42     |
 | version 2.0 |     6.96      |    278.39     |     36.62     |     39.43     |
 |             |               |               |               |               |
