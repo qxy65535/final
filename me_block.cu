@@ -69,24 +69,30 @@ __global__ void me_kernel(int padw, int padh, struct macroblock *mbs, int me_sea
     __syncthreads();
 
     // 找出最相似的参考块
-    for (i=0; i<(bottom-top); ++i)
+    if (sads[threadIdx.y][threadIdx.x] == best_sad)
     {
-        for (j=0; j<(right-left); ++j)
-        {
-            if (sads[i][j] == best_sad)
-            {
-                mb->mv_x = left + j - mx;
-                mb->mv_y = top + i - my;
-                i = bottom-top;
-                break;
-            }
-        }
+        mb->mv_x = left + threadIdx.x - mx;
+        mb->mv_y = top + threadIdx.y - my;
     }
+    // for (i=0; i<(bottom-top); ++i)
+    // {
+    //     for (j=0; j<(right-left); ++j)
+    //     {
+    //         if (sads[i][j] == best_sad)
+    //         {
+    //             mb->mv_x = left + j - mx;
+    //             mb->mv_y = top + i - my;
+    //             i = bottom-top;
+    //             break;
+    //         }
+    //     }
+    // }
     mb->use_mv = 1;
 }  
 
 extern "C" void me_block_cuda(struct c63_common *cm, uint8_t *orig_host, uint8_t *ref_host, int cc)
 {
+    // cudaSetDevice(1);
     struct macroblock *mbs;
     uint8_t *orig, *ref;
 
