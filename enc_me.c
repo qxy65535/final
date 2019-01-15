@@ -78,7 +78,6 @@ void c63_motion_estimate(struct c63_common *cm)
 {
     /* Compare this frame with previous reconstructed frame */
     // printf("111\n");
-    int mb_x, mb_y;
     me_block_cuda(cm, cm->curframe->orig->Y, cm->refframe->recons->Y, 0);
     me_block_cuda(cm, cm->curframe->orig->U, cm->refframe->recons->U, 1);
     me_block_cuda(cm, cm->curframe->orig->V, cm->refframe->recons->V, 2);

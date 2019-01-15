@@ -12,9 +12,7 @@
 
 __global__ void me_kernel(int padw, int padh, struct macroblock *mbs, int me_search_range, uint8_t *orig, uint8_t *ref, int cc)  
 {
-    __shared__ int sads[16*2][16*2];
     __shared__ int best_sad;
-    sads[threadIdx.y][threadIdx.x] = 0;
     best_sad = INT_MAX;
 
     int mb_x = blockIdx.x;
@@ -55,21 +53,19 @@ __global__ void me_kernel(int padw, int padh, struct macroblock *mbs, int me_sea
     int col = blockIdx.x*8;
 
     int i,j;
+    int result = 0;
     for (i=0; i<8; ++i)
     {
         for (j=0; j<8; ++j)
-        {
-            int result = abs(*(orig+(row+i)*w+col+j) - *(ref+(top+threadIdx.y+i)*w+left+threadIdx.x+j));
-            atomicAdd(&sads[threadIdx.y][threadIdx.x], result);
-        }
+            result += abs(*(orig+(row+i)*w+col+j) - *(ref+(top+threadIdx.y+i)*w+left+threadIdx.x+j));
     }
 
     // 找出小的sad值
-    atomicMin(&best_sad, sads[threadIdx.y][threadIdx.x]);
+    atomicMin(&best_sad, result);
     __syncthreads();
 
     // 找出最相似的参考块
-    if (sads[threadIdx.y][threadIdx.x] == best_sad)
+    if (result == best_sad)
     {
         mb->mv_x = left + threadIdx.x - mx;
         mb->mv_y = top + threadIdx.y - my;
@@ -136,7 +132,7 @@ extern "C" void me_block_cuda(struct c63_common *cm, uint8_t *orig_host, uint8_t
     {
         fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
     }
-
+    
     cudaMemcpy(cm->curframe->mbs[cc], mbs, size_mbs, cudaMemcpyDeviceToHost);
 
     cudaFree(mbs);
