@@ -12,7 +12,6 @@
 #include "c63.h"
 #include "tables.h"
 
-
 static char *output_file, *input_file;
 FILE *outfile;
 
@@ -31,15 +30,23 @@ static uint32_t vpw;
 extern int optind;
 extern char *optarg;
 
+/* cuda functions */
+int InitCUDA(void);
+void c63_motion_estimate_cuda(struct c63_common * cm);
+void dct_quantize_cuda(uint8_t * in_data_, uint8_t * prediction_, uint32_t width, 
+                    uint32_t height, int16_t * out_data_, uint8_t * quantization_);
+void dequantize_idct_cuda(int16_t * in_data_, uint8_t * prediction_, uint32_t width, 
+                    uint32_t height, uint8_t * out_data_, uint8_t * quantization_);
+
 /* Read YUV frames */
-static yuv_t* read_yuv(FILE *file)
+static yuv_t* read_yuv(FILE *file, struct c63_common *cm)
 {
     size_t len = 0;
     yuv_t *image = malloc(sizeof(yuv_t));
 
 
     /* Read Y' */
-    image->Y = malloc(width*height);
+    image->Y = calloc(1, cm->ypw*cm->yph);
     len += fread(image->Y, 1, width*height, file);
     if(ferror(file))
     {
@@ -48,7 +55,7 @@ static yuv_t* read_yuv(FILE *file)
     }
 
     /* Read U */
-    image->U = malloc(width*height);
+    image->U = calloc(1, cm->upw*cm->uph);
     len += fread(image->U, 1, (width*height)/4, file);
     if(ferror(file))
     {
@@ -57,7 +64,7 @@ static yuv_t* read_yuv(FILE *file)
     }
 
     /* Read V */
-    image->V = malloc(width*height);
+    image->V = calloc(1, cm->vpw*cm->vph);
     len += fread(image->V, 1, (width*height)/4, file);
     if(ferror(file))
     {
@@ -98,21 +105,21 @@ static void c63_encode_image(struct c63_common *cm, yuv_t *image)
     if (!cm->curframe->keyframe)
     {
         /* Motion Estimation */
-        c63_motion_estimate(cm);
+        c63_motion_estimate_cuda(cm);
 
         /* Motion Compensation */
         c63_motion_compensate(cm);
     }
 
     /* DCT and Quantization */
-    dct_quantize(image->Y, cm->curframe->predicted->Y, cm->padw[0], cm->padh[0], cm->curframe->residuals->Ydct, cm->quanttbl[0]);
-    dct_quantize(image->U, cm->curframe->predicted->U, cm->padw[1], cm->padh[1], cm->curframe->residuals->Udct, cm->quanttbl[1]);
-    dct_quantize(image->V, cm->curframe->predicted->V, cm->padw[2], cm->padh[2], cm->curframe->residuals->Vdct, cm->quanttbl[2]);
+    dct_quantize_cuda(image->Y, cm->curframe->predicted->Y, cm->padw[0], cm->padh[0], cm->curframe->residuals->Ydct, cm->quanttbl[0]);
+    dct_quantize_cuda(image->U, cm->curframe->predicted->U, cm->padw[1], cm->padh[1], cm->curframe->residuals->Udct, cm->quanttbl[1]);
+    dct_quantize_cuda(image->V, cm->curframe->predicted->V, cm->padw[2], cm->padh[2], cm->curframe->residuals->Vdct, cm->quanttbl[2]);
 
     /* Reconstruct frame for inter-prediction */
-    dequantize_idct(cm->curframe->residuals->Ydct, cm->curframe->predicted->Y, cm->ypw, cm->yph, cm->curframe->recons->Y, cm->quanttbl[0]);
-    dequantize_idct(cm->curframe->residuals->Udct, cm->curframe->predicted->U, cm->upw, cm->uph, cm->curframe->recons->U, cm->quanttbl[1]);
-    dequantize_idct(cm->curframe->residuals->Vdct, cm->curframe->predicted->V, cm->vpw, cm->vph, cm->curframe->recons->V, cm->quanttbl[2]);
+    dequantize_idct_cuda(cm->curframe->residuals->Ydct, cm->curframe->predicted->Y, cm->ypw, cm->yph, cm->curframe->recons->Y, cm->quanttbl[0]);
+    dequantize_idct_cuda(cm->curframe->residuals->Udct, cm->curframe->predicted->U, cm->upw, cm->uph, cm->curframe->recons->U, cm->quanttbl[1]);
+    dequantize_idct_cuda(cm->curframe->residuals->Vdct, cm->curframe->predicted->V, cm->vpw, cm->vph, cm->curframe->recons->V, cm->quanttbl[2]);
 
     /* dump_image can be used here to check if the prediction is correct */
 
@@ -175,12 +182,19 @@ int main(int argc, char **argv)
     int c;
     yuv_t *image;
     int start, stop;
-    start = clock();
 
     if(argc == 1)
     {
         print_help();
     }
+
+    if (!InitCUDA())
+    {
+        fprintf(stderr, "There is no device supporting CUDA.\n");
+        return 0;
+    }
+
+    start = clock();
 
     while((c = getopt(argc, argv, "h:w:o:f:i:")) != -1)
     {
@@ -217,8 +231,7 @@ int main(int argc, char **argv)
         perror("fopen");
         exit(EXIT_FAILURE);
     }
-    
-
+        
     struct c63_common *cm = init_c63_enc(width, height);
     cm->e_ctx.fp = outfile;
 
@@ -249,7 +262,7 @@ int main(int argc, char **argv)
     int numframes = 0;;
     while(!feof(infile))
     {
-        image = read_yuv(infile);
+        image = read_yuv(infile, cm);
 
         if (!image) {
             break;
@@ -273,7 +286,7 @@ int main(int argc, char **argv)
 
     fclose(outfile);
     fclose(infile);
-    
+
     stop = clock();
     printf("total time: %.2f\n", (float)(stop-start)/CLOCKS_PER_SEC);
 //
