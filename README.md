@@ -1,21 +1,21 @@
-## 目录
+# 目录
 #### - [优化说明](#optimization)
 - [version 1.0](#v1)
 - [version 2.0](#v2)
 - [version 2.1](#v2.1)
 - [version 3.0](#v3.0)
-- - [BUG 修复](#bug)
+  - [BUG 修复](#bug)
   - [优化](#optim)
 #### - [优化结果](#result)
 #### - [执行指令](#shell)
 
 <div id="optimization"> </div>
 
-## 优化说明
+# 优化说明
 
 <div id="v1"> </div>
 
-### version 1.0
+## version 1.0
 
 **git commit id: 04f7a58e92082ce44f62bf746f1e0cb3910c58e2**
 
@@ -141,7 +141,7 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
 
 <div id="v2"> </div>
 
-### version 2.0
+## version 2.0
 
 **git commit id: e86fd841ab7abda00cd58b64d3a8c6e07dfb7237**
 
@@ -219,7 +219,7 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
 
 <div id="v2.1"> </div>
 
-### version 2.1
+## version 2.1
 
 **git commit id: 3cd646339d6db38eead8fde8a1d35b8b788940ce**
 
@@ -254,13 +254,15 @@ if (result == best_sad)
 
 <div id="v3.0"> </div>
 
-### version 3.0
+## version 3.0
+
+**git commit id:  1301d0a443e809ad5ab93bf715c2024ae94ca77e**
 
 v3.0 加入了对 dct、idct 的 cuda 加速，并整理了全部的代码。
 
 <div id="bug"> </div>
 
-#### bug 修复
+### bug 修复
 
 在原版代码的 dct 和量化过程中，代码如下：
 
@@ -283,7 +285,7 @@ image->V = calloc(1, cm->vpw*cm->vph);
 
 <div id="optim"> </div>
 
-#### 优化
+### 优化
 
 以 dct 和量化为例，与运动估计 v1.0 优化的思路相同，这里将 Grid 划分为 (pad_width/8, pad_height/8) 个 Block，每个 Block 有 8\*8 个 Thread，如图 1。以 8\*8 的数据块为单位，每个 Block 分别顺序地执行当前帧与预测帧作差、dct 1d、转置、scale、量化等操作，并写入到残差帧中。核函数中使用共享存储器存放原始的 8\*8 数据块和处理后的结果，每个 Thread 处理 8\*8 数据块中的一个数据。
 
@@ -293,7 +295,7 @@ image->V = calloc(1, cm->vpw*cm->vph);
 
 <div id="result"> </div>
 
-## 优化结果
+# 优化结果
 
 由于 gprof 工具无法记录 GPU 调用的时间，因此本次实验仍采用 clock 方法在程序始末添加时钟计算程序执行的总时间。本表格中，运行时间为在服务器上连续运行十次取平均值，使用的显卡为 Tesla K20c。
 
@@ -309,7 +311,7 @@ image->V = calloc(1, cm->vpw*cm->vph);
 
 <div id="shell"> </div>
 
-## 执行指令
+# 执行指令
 
 **compile**
 
