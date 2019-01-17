@@ -3,6 +3,9 @@
 - [version 1.0](#v1)
 - [version 2.0](#v2)
 - [version 2.1](#v2.1)
+- [version 3.0](#v3.0)
+- - [BUG 修复](#bug)
+  - [优化](#optim)
 #### - [优化结果](#result)
 #### - [执行指令](#shell)
 
@@ -12,7 +15,7 @@
 
 <div id="v1"> </div>
 
-## version 1.0
+### version 1.0
 
 **git commit id: 04f7a58e92082ce44f62bf746f1e0cb3910c58e2**
 
@@ -118,7 +121,7 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
   0.00%  2.0290us         4     507ns     284ns     714ns  cuDeviceGet
 ```
 
-由于 kernel 的调用是异步的，调用 kernel 后不久主机线程就会获得控制，这样一来下一个 cudaMemcpy 会在 kernel 完成执行前启动。 而 cudaMemcpy 会阻塞等待 kernel 的结果，直到 kernel  执行结束才进行数据传输并返回。如图2所示：
+由于 kernel 的调用是相对于 CPU 异步的，调用 kernel 后不久主机线程就会获得控制，这样一来下一个 cudaMemcpy 会在 kernel 完成执行前启动。 而 cudaMemcpy 会阻塞等待 kernel 的结果，直到 kernel  执行结束才进行数据传输并返回。如图2所示：
 
 ![1547261461144](image/1547261461144.png)
 
@@ -138,7 +141,7 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
 
 <div id="v2"> </div>
 
-## version 2.0
+### version 2.0
 
 **git commit id: e86fd841ab7abda00cd58b64d3a8c6e07dfb7237**
 
@@ -210,45 +213,83 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
  99.17%  3.50949s       891  3.9388ms  1.1101ms  12.460ms  me_kernel(int, int, macroblock*, int, unsigned char*, unsigned char*, int)
   0.74%  26.115ms      1782  14.654us  5.4400us  28.481us  [CUDA memcpy HtoD]
   0.09%  3.1170ms       891  3.4980us  2.8160us  11.872us  [CUDA memcpy DtoH]
-
-==17506== API calls:
-Time(%)      Time     Calls       Avg       Min       Max  Name
- 80.76%  3.61036s      2673  1.3507ms  31.686us  12.482ms  cudaMemcpy
- 12.71%  568.03ms      2673  212.51us  5.3340us  239.58ms  cudaMalloc
-  6.05%  270.27ms      2673  101.11us  8.7620us  265.13us  cudaFree
-  0.39%  17.541ms       891  19.686us  16.582us  53.811us  cudaLaunch
-  0.04%  1.7320ms      6237     277ns     172ns  62.732us  cudaSetupArgument
-  0.02%  1.1129ms       166  6.7040us     299ns  268.08us  cuDeviceGetAttribute
-  0.01%  570.66us       891     640ns     499ns  3.0340us  cudaConfigureCall
-  0.01%  402.48us       891     451ns     339ns  12.863us  cudaGetLastError
-  0.00%  146.78us         2  73.390us  63.445us  83.336us  cuDeviceTotalMem
-  0.00%  110.29us         2  55.145us  51.847us  58.444us  cuDeviceGetName
-  0.00%  5.6030us         2  2.8010us  1.0330us  4.5700us  cuDeviceGetCount
-  0.00%  2.9770us         4     744ns     416ns  1.3210us  cuDeviceGet
 ```
 
 可见核函数的运行时间被极大地压缩了，v2.0 比起 v1.0 具有很大程度的提升。除此之外，由于数据处理的并行化程度与视频分辨率，即每一帧的图像大小相关，而数据传输远远不是目前的瓶颈，因此对分辨率更高的 tractor 文件相比于低分辨率的 foreman 文件获得了更高的加速比，尤其是在更高程度并行化的 v2.0 中，两者之差体现得更为明显，这也体现了 GPU 更适合对大批量的数据进行并行处理，且数据量越大，加速效果越明显。
 
 <div id="v2.1"> </div>
 
-## version 2.1
+### version 2.1
 
-**git commit id: 04bd9784560816dc8fca8f3bd12ecb979e6ccd3e**
+**git commit id: 3cd646339d6db38eead8fde8a1d35b8b788940ce**
 
 原本由于图 3 中观察到 v2.0 访问参考帧的数据时有非常大量的数据被重复访问，因此考虑每个 Block 将 32\*32 大小的参考帧数据放入共享存储器以加速数据的读取。但在实际操作中发现效果并不理想，进一步了解到对共享存储器的访问存在 bank conflict，若有 x 个同一 warp 的线程同时访问一个 bank，则其访问速度将下降到 1/x。而根据我 v2.0 的操作方法，若使用共享存储器，将存在非常大量的 bank conflict，使数据读取速度不加反减，因此最终放弃了使用共享存储器的做法。
 
 而在 review 代码的过程中，发现找出最相似参考块的过程存在串行冗余，因此将代码修改如下：
 
 ```c
+int result = 0;
+for (i=0; i<8; ++i)
+{
+    for (j=0; j<8; ++j)
+        result += abs(*(orig+(row+i)*w+col+j) - 
+                      *(ref+(top+threadIdx.y+i)*w+left+threadIdx.x+j));
+}
+
+// 找出小的sad值
+atomicMin(&best_sad, result);
+__syncthreads();
+
 // 找出最相似的参考块
-if (sads[threadIdx.y][threadIdx.x] == best_sad)
+if (result == best_sad)
 {
     mb->mv_x = left + threadIdx.x - mx;
     mb->mv_y = top + threadIdx.y - my;
 }
 ```
 
-由于在前面的代码中已经通过原子操作和线程同步获得了 best_sad 的最小值，因此只需要每个线程各自对比自己的 best_sad 是不是最小值来决定要不要给 mb 的运动向量赋值就行了，并不需要再通过循环寻找 best_sad。在 v2.1 的优化后，对 foreman 文件的处理时间为 5.05s，加速约 6.94 倍；对 tractor 文件的处理时间由为 182.83s，加速约 9.62 倍，文件解码后 psnr 分别为 36.62 和 39.43，与原版编码器得到的结果相同。
+由于在前面的代码中已经通过原子操作和线程同步获得了 best_sad 的最小值，因此只需要每个线程各自对比自己的 best_sad 是不是最小值来决定要不要给 mb 的运动向量赋值就行了，并不需要再通过循环寻找 best_sad，同时也可以取消掉共享存储器的 \_\_shared\_\_ int sads 数组，进一步减少浪费提高性能。在 v2.1 的优化后，对 foreman 文件的处理时间为 4.84s，加速约 7.24 倍；对 tractor 文件的处理时间由为 175.16s，加速约 10.04 倍，文件解码后 psnr 分别为 36.63 和 39.43，与原版编码器得到的结果相比有一些小的偏差，但对视频观看没有任何影响。
+
+此外，由于核函数运行期间控制权回到 CPU 主线程但被 cudaMemcpy 阻塞，因此可以在执行时间较长的 Y 帧核函数执行期间进行接下来 U、V 帧计算前 CPU 的操作。经过实验这样做可以对 forman 和 tractor 分别获得 0.4 秒和 2 秒 左右的加速，但由于较大地降低了代码的可读性，因此最终没有采用这个版本。
+
+<div id="v3.0"> </div>
+
+### version 3.0
+
+v3.0 加入了对 dct、idct 的 cuda 加速，并整理了全部的代码。
+
+<div id="bug"> </div>
+
+#### bug 修复
+
+在原版代码的 dct 和量化过程中，代码如下：
+
+```c
+dct_quantize(image->Y, cm->curframe->predicted->Y, cm->padw[0], cm->padh[0], cm->curframe->residuals->Ydct, cm->quanttbl[0]);
+dct_quantize(image->U, cm->curframe->predicted->U, cm->padw[1], cm->padh[1], cm->curframe->residuals->Udct, cm->quanttbl[1]);
+dct_quantize(image->V, cm->curframe->predicted->V, cm->padw[2], cm->padh[2], cm->curframe->residuals->Vdct, cm->quanttbl[2]);
+```
+
+由于分配内存时 image->Y 的尺寸是 width\*height，而 dct 和量化时使用 padw 和 padh 必然对 image->Y 访问越界。为杜绝后患，在新建帧分配内存时，使用如下代码：
+
+```c
+/* Read Y' */
+image->Y = calloc(1, cm->ypw*cm->yph);
+/* Read U */
+image->U = calloc(1, cm->upw*cm->uph);
+/* Read V */
+image->V = calloc(1, cm->vpw*cm->vph);
+```
+
+<div id="optim"> </div>
+
+#### 优化
+
+以 dct 和量化为例，与运动估计 v1.0 优化的思路相同，这里将 Grid 划分为 (pad_width/8, pad_height/8) 个 Block，每个 Block 有 8\*8 个 Thread，如图 1。以 8\*8 的数据块为单位，每个 Block 分别顺序地执行当前帧与预测帧作差、dct 1d、转置、scale、量化等操作，并写入到残差帧中。核函数中使用共享存储器存放原始的 8\*8 数据块和处理后的结果，每个 Thread 处理 8\*8 数据块中的一个数据。
+
+比起运动估计在如何进行数据共享、如何将数据处理并行化上下了些功夫，dct 和量化以及 idct 和反量化只是简单地理清了数据存放的关系，并将 CPU 部分的代码移植到了 GPU 上，没有什么特殊的处理技术。值得注意的是作为 dct 量化的输出和 idct 反量化的输入，在残差帧中每个 8\*8 的宏块是连续顺序存放的，与原始帧的存放方式不同。关于这一部分的代码详见 cuda\_utils.cu，此处不再详细贴出。
+
+在 v3.0 的修改和优化后，对 foreman 文件的处理时间为 4.34s，加速约 8.08 倍；对 tractor 文件的处理时间由为 119.72s，加速约 14.70 倍，文件解码后 psnr 分别为 36.62 和 39.43，与原版编码器得到的结果相同。对 tractor 文件而言每一帧具有更多的数据，我的优化方法具有更高的并行度，因此其达到了远高于 foreman 的加速效果。
 
 <div id="result"> </div>
 
@@ -261,10 +302,10 @@ if (sads[threadIdx.y][threadIdx.x] == best_sad)
 |  原始代码   |     35.06     |    1759.43    |     36.62     |     39.43     |
 | version 1.0 |     15.49     |    704.80     |     36.62     |     39.42     |
 | version 2.0 |     6.96      |    278.39     |     36.62     |     39.43     |
-| version 2.1 |     5.05      |    182.83     |     36.62     |     39.43     |
-|             |               |               |               |               |
-|             |               |               |               |               |
-|             |               |               |               |               |
+| version 2.1 |     4.84      |    175.16     |     36.63     |     39.43     |
+| version 3.0 |     4.34      |    119.72     |     36.62     |     39.43     |
+
+最终代码版本为 version 3.0，实验得到对 foreman 和 tractor 文件的加速分别达到了原版编码器的 8.08 倍和 14.70 倍，且编码得到的 .c63 文件能被原版解码器正常解码；解码得到的视频文件能够正常播放，相较于原始文件的 PSNR 与原版编解码器得到的结果相同。
 
 <div id="shell"> </div>
 
@@ -306,4 +347,6 @@ $ vlc --rawvid-width 1920 --rawvid-height 1080 --rawvid-fps 30 --rawvid-chroma I
 ```shell
 $ gprof c63enc gmon.out -p
 $ nvprof --print-gpu-trace ./c63enc -w 352 -h 288 -o tmp/FOREMAN_352x288_30_orig_01.c63 /home/FOREMAN_352x288_30_orig_01.yuv
+
+$ nvprof --print-gpu-trace ./c63enc -w 1920 -h 1080 -o tmp/1080p_tractor.c63 /home/1080p_tractor.yuv
 ```
