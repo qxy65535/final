@@ -316,7 +316,7 @@ void me_block_cuda(struct c63_common *cm, uint8_t *orig_host, uint8_t *ref_host,
         break;
     }
     
-    cudaMalloc((void **)&mbs, size_mbs);
+    cudaMalloc((void **) &mbs, size_mbs);
     cudaMalloc((void **) &orig, size_orig);
     cudaMalloc((void **) &ref, size_ref);
     cudaMemcpy(orig, orig_host, size_orig, cudaMemcpyHostToDevice);
@@ -357,7 +357,7 @@ extern "C" void dct_quantize_cuda(uint8_t * in_data_, uint8_t * prediction_, uin
     uint8_t *in_data, *prediction, *quantization;
     int16_t *out_data;
 
-    cudaMalloc((void **)&in_data, size);
+    cudaMalloc((void **) &in_data, size);
     cudaMalloc((void **) &prediction, sizeof(uint8_t) * size);
     cudaMalloc((void **) &out_data, sizeof(int16_t) * size);
     cudaMalloc((void **) &quantization, sizeof(uint8_t) * 64);

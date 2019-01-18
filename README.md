@@ -1,4 +1,8 @@
-# 目录
+# Final Exam: Video Encoding on GPU using the CUDA framework
+
+## 目录
+
+#### - [简介](#introduction)
 #### - [优化说明](#optimization)
 - [version 1.0](#v1)
 - [version 2.0](#v2)
@@ -9,13 +13,19 @@
 #### - [优化结果](#result)
 #### - [执行指令](#shell)
 
+<div id="introduction"> </div>
+
+## 简介
+
+本次作业的任务是利用 CUDA 优化加速 codec63 视频编码器。作业中使用 GPU 对 c63 编码器的运动估计、dct 和量化、反量化和 idct 部分进行并行优化，达到加速视频编码速度的目的。实验运行于 Intel(R) Xeon(R) CPU E5-2620 v2 @ 2.10GHz，Tesla K20c，CentOS Linux release 7.3.1611 平台，得到对 foreman 和 tractor 文件的加速分别达到了原版编码器的 8.08 倍和 14.70 倍，且编码得到的 .c63 文件能被原版解码器正常解码；解码得到的视频文件能够正常播放，相较于原始文件的 PSNR 与原版编解码器得到的结果相同。
+
 <div id="optimization"> </div>
 
-# 优化说明
+## 优化说明
 
 <div id="v1"> </div>
 
-## version 1.0
+### version 1.0
 
 **git commit id: 04f7a58e92082ce44f62bf746f1e0cb3910c58e2**
 
@@ -141,7 +151,7 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
 
 <div id="v2"> </div>
 
-## version 2.0
+### version 2.0
 
 **git commit id: e86fd841ab7abda00cd58b64d3a8c6e07dfb7237**
 
@@ -219,7 +229,7 @@ Time(%)      Time     Calls       Avg       Min       Max  Name
 
 <div id="v2.1"> </div>
 
-## version 2.1
+### version 2.1
 
 **git commit id: 3cd646339d6db38eead8fde8a1d35b8b788940ce**
 
@@ -254,7 +264,7 @@ if (result == best_sad)
 
 <div id="v3.0"> </div>
 
-## version 3.0
+### version 3.0
 
 **git commit id:  1301d0a443e809ad5ab93bf715c2024ae94ca77e**
 
@@ -262,7 +272,7 @@ v3.0 加入了对 dct、idct 的 cuda 加速，并整理了全部的代码。
 
 <div id="bug"> </div>
 
-### bug 修复
+#### bug 修复
 
 在原版代码的 dct 和量化过程中，代码如下：
 
@@ -285,17 +295,148 @@ image->V = calloc(1, cm->vpw*cm->vph);
 
 <div id="optim"> </div>
 
-### 优化
+#### 优化
 
 以 dct 和量化为例，与运动估计 v1.0 优化的思路相同，这里将 Grid 划分为 (pad_width/8, pad_height/8) 个 Block，每个 Block 有 8\*8 个 Thread，如图 1。以 8\*8 的数据块为单位，每个 Block 分别顺序地执行当前帧与预测帧作差、dct 1d、转置、scale、量化等操作，并写入到残差帧中。核函数中使用共享存储器存放原始的 8\*8 数据块和处理后的结果，每个 Thread 处理 8\*8 数据块中的一个数据。
 
-比起运动估计在如何进行数据共享、如何将数据处理并行化上下了些功夫，dct 和量化以及 idct 和反量化只是简单地理清了数据存放的关系，并将 CPU 部分的代码移植到了 GPU 上，没有什么特殊的处理技术。值得注意的是作为 dct 量化的输出和 idct 反量化的输入，在残差帧中每个 8\*8 的宏块是连续顺序存放的，与原始帧的存放方式不同。关于这一部分的代码详见 cuda\_utils.cu，此处不再详细贴出。
+比起运动估计在如何进行数据共享、如何将数据处理并行化上下了些功夫，dct 和量化以及 idct 和反量化只是简单地理清了数据存放的关系，并将 CPU 部分的代码移植到了 GPU 上，没有什么特殊的处理技术。值得注意的是作为 dct 量化的输出和 idct 反量化的输入，在残差帧中每个 8\*8 的宏块是连续顺序存放的，与原始帧的存放方式不同。dct 和量化的核函数代码如下：
+
+```c
+__global__ void dct_quantize_kernel(uint8_t * in_data, uint8_t * prediction, 
+                                int16_t * out_data, uint8_t * quant_tbl, int width)
+{
+    __shared__ int16_t block[8][8];
+    __shared__ float dct_out[8][8];
+    __shared__ float dct_out2[8][8];
+    float dctlookup[8][8] = {
+        {1.000000f, 0.980785f, 0.923880f, 0.831470f, 0.707107f, 0.555570f, 0.382683f, 0.195090f, },
+        {1.000000f, 0.831470f, 0.382683f, -0.195090f, -0.707107f, -0.980785f, -0.923880f, -0.555570f, },
+        {1.000000f, 0.555570f, -0.382683f, -0.980785f, -0.707107f, 0.195090f, 0.923880f, 0.831470f, },
+        {1.000000f, 0.195090f, -0.923880f, -0.555570f, 0.707107f, 0.831470f, -0.382683f, -0.980785f, },
+        {1.000000f, -0.195090f, -0.923880f, 0.555570f, 0.707107f, -0.831470f, -0.382683f, 0.980785f, },
+        {1.000000f, -0.555570f, -0.382683f, 0.980785f, -0.707107f, -0.195090f, 0.923880f, -0.831470f, },
+        {1.000000f, -0.831470f, 0.382683f, 0.195090f, -0.707107f, 0.980785f, -0.923880f, 0.555570f, },
+        {1.000000f, -0.980785f, 0.923880f, -0.831470f, 0.707107f, -0.555570f, 0.382683f, -0.195090f, },
+    };
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    block[threadIdx.y][threadIdx.x] = (int16_t)*(in_data + row * width + col) - 
+                                                *(prediction + row * width + col);
+    __syncthreads();
+
+    int i;
+    float dct = 0;
+
+    // dct 1d
+    for (i=0; i<8; ++i)
+        dct += block[threadIdx.y][i] * dctlookup[i][threadIdx.x];
+    // transpose
+    dct_out[threadIdx.x][threadIdx.y] = dct;
+    __syncthreads();
+
+    // dct 1d
+    dct = 0;
+    for (i=0; i<8; ++i)
+        dct += dct_out[threadIdx.y][i] * dctlookup[i][threadIdx.x];
+    // transpose
+    // dct_out2[threadIdx.x][threadIdx.y] = dct;
+    // __syncthreads();
+    // scale_block
+    float a1 = !threadIdx.x ? ISQRT2 : 1.0f;
+    float a2 = !threadIdx.y ? ISQRT2 : 1.0f;
+    dct_out2[threadIdx.x][threadIdx.y] = dct * a1 * a2;
+    __syncthreads();
+    // quantize_block
+    uint8_t zigzag_U[64] =
+    {
+        0,
+        1, 0,
+        0, 1, 2,
+        3, 2, 1, 0,
+        0, 1, 2, 3, 4,
+        5, 4, 3, 2, 1, 0,
+        0, 1, 2, 3, 4, 5, 6,
+        7, 6, 5, 4, 3, 2, 1, 0,
+        1, 2, 3, 4, 5, 6, 7,
+        7, 6, 5, 4, 3, 2,
+        3, 4, 5, 6, 7,
+        7, 6, 5, 4,
+        5, 6, 7,
+        7, 6,
+        7,
+    };
+    uint8_t zigzag_V[64] =
+    {
+        0,
+        0, 1,
+        2, 1, 0,
+        0, 1, 2, 3,
+        4, 3, 2, 1, 0,
+        0, 1, 2, 3, 4, 5,
+        6, 5, 4, 3, 2, 1, 0,
+        0, 1, 2, 3, 4, 5, 6, 7,
+        7, 6, 5, 4, 3, 2, 1,
+        2, 3, 4, 5, 6, 7,
+        7, 6, 5, 4, 3,
+        4, 5, 6, 7,
+        7, 6, 5,
+        6, 7,
+        7,
+    };
+    int zigzag = threadIdx.y * 8 + threadIdx.x;
+    uint8_t u = zigzag_U[zigzag];
+    uint8_t v = zigzag_V[zigzag];
+    out_data[zigzag + blockIdx.y*width*8 + blockIdx.x*64] = round((dct_out2[v][u] / 4.0) / quant_tbl[zigzag]);
+}
+```
+
+在代码中，dctlookup、zigzag\_U 和 zigzag\_V 采用硬编码的形式放在核函数中，减少数据传输的不必要开销，但一定程度上降低了代码的可读性。数据拷贝和核函数调用的操作如下：
+
+```c
+extern "C" void dct_quantize_cuda(uint8_t * in_data_, uint8_t * prediction_, uint32_t width, 
+                                uint32_t height, int16_t * out_data_, uint8_t * quantization_)
+{
+    int size = width*height;
+    uint8_t *in_data, *prediction, *quantization;
+    int16_t *out_data;
+
+    cudaMalloc((void **) &in_data, size);
+    cudaMalloc((void **) &prediction, sizeof(uint8_t) * size);
+    cudaMalloc((void **) &out_data, sizeof(int16_t) * size);
+    cudaMalloc((void **) &quantization, sizeof(uint8_t) * 64);
+
+    cudaMemcpy(in_data, in_data_, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(prediction, prediction_, sizeof(uint8_t) * size, cudaMemcpyHostToDevice);
+    cudaMemcpy(quantization, quantization_, sizeof(uint8_t) * 64, cudaMemcpyHostToDevice);
+
+    int grid_x = width/8;
+    int grid_y = height/8;
+    dim3 dimGrid(grid_x, grid_y);
+    dim3 dimBlock(8,8);
+
+    dct_quantize_kernel<<<dimGrid, dimBlock>>>(in_data, prediction, out_data, quantization, width);
+    cudaError_t cudaStatus = cudaGetLastError();
+    if (cudaStatus != cudaSuccess) 
+    {
+        fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
+    }
+    
+    cudaMemcpy(out_data_, out_data, sizeof(int16_t) * size, cudaMemcpyDeviceToHost);
+    cudaFree(in_data);
+    cudaFree(prediction);
+    cudaFree(out_data);
+    cudaFree(quantization);
+}
+```
+
+反量化和 idct 部分的代码与其类似，关于这一部分的代码详见 cuda\_utils.cu，此处不再贴出。
 
 在 v3.0 的修改和优化后，对 foreman 文件的处理时间为 4.34s，加速约 8.08 倍；对 tractor 文件的处理时间由为 119.72s，加速约 14.70 倍，文件解码后 psnr 分别为 36.62 和 39.43，与原版编码器得到的结果相同。对 tractor 文件而言每一帧具有更多的数据，我的优化方法具有更高的并行度，因此其达到了远高于 foreman 的加速效果。
 
 <div id="result"> </div>
 
-# 优化结果
+## 优化结果
 
 由于 gprof 工具无法记录 GPU 调用的时间，因此本次实验仍采用 clock 方法在程序始末添加时钟计算程序执行的总时间。本表格中，运行时间为在服务器上连续运行十次取平均值，使用的显卡为 Tesla K20c。
 
@@ -309,9 +450,11 @@ image->V = calloc(1, cm->vpw*cm->vph);
 
 最终代码版本为 version 3.0，实验得到对 foreman 和 tractor 文件的加速分别达到了原版编码器的 8.08 倍和 14.70 倍，且编码得到的 .c63 文件能被原版解码器正常解码；解码得到的视频文件能够正常播放，相较于原始文件的 PSNR 与原版编解码器得到的结果相同。
 
+version 3.0 编码器对 foreman 编码后得到的文件大小为 4,934,754 字节，略大于原版编码器得到的 4,933,703 字节；对 tractor 编码后得到的文件大小为 223,546,531 字节，也略大于原版编码器得到的 223,384,379 字节。我也不知道为什么会差一点。。。
+
 <div id="shell"> </div>
 
-# 执行指令
+## 执行指令
 
 **compile**
 
